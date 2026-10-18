@@ -185,8 +185,10 @@ input[type="range"]::-moz-range-thumb { width: 24px; height: 24px; border-radius
 .mov .concepto { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mov .cat { font-size: .8rem; color: var(--tinta-2); grid-row: 2; }
 .mov .cat.manual::after { content: " · manual"; color: var(--tinta-3); }
+.mov .cat.tr::after { content: " · Trade Republic"; color: var(--tinta-3); }
 .mov .importe { grid-row: 1 / 3; align-self: center; font-variant-numeric: tabular-nums; font-weight: 600; font-family: var(--display); font-size: 1.1rem; }
 .mov .importe.ingreso { color: var(--verde); }
+.mov .importe.neutro { color: var(--tinta-3); font-weight: 400; }
 
 /* ----- Presupuestos ----- */
 .presu { display: grid; gap: 12px; }

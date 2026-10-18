@@ -18,11 +18,14 @@
   const fechaLarga = iso => { const s = fechaLocal(iso).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }); return s.charAt(0).toUpperCase() + s.slice(1); };
   const redondea5 = n => Math.max(5, Math.round(n / 5) * 5);
   const titulos = { inicio: 'Inicio', movimientos: 'Movimientos', presupuestos: 'Límites', simulador: 'Simular recortes', ajustes: 'Ajustes' };
+  const PDFJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+  const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
   // ---------- Estado ----------
   const porDefecto = () => ({
     movimientos: [],
-    ajustes: { ingresosMensuales: 0, objetivo: { importe: 0, ahorrado: 0, fechaLimite: '' }, presupuestos: {}, reglasComercio: {} },
+    ajustes: { ingresosMensuales: 0, objetivo: { importe: 0, ahorrado: 0, fechaLimite: '' }, presupuestos: {}, reglasComercio: {},
+      patrimonio: { bbva: 0, trEfectivo: 0, inversiones: 0, otros: 0 } },
   });
   let estado = cargar();
   let avisoGuardado = false;
@@ -33,11 +36,14 @@
     try {
       const raw = localStorage.getItem(CLAVE);
       if (!raw) return base;
-      const d = JSON.parse(raw);
+      const d = JSON.parse(raw), a = d.ajustes || {};
+      // Versiones anteriores guardaban "ahorrado" como un único número: pasa a "otros ahorros".
+      const patrimonio = a.patrimonio ? { ...base.ajustes.patrimonio, ...a.patrimonio }
+        : { ...base.ajustes.patrimonio, otros: Number((a.objetivo || {}).ahorrado) || 0 };
       return {
         movimientos: Array.isArray(d.movimientos) ? d.movimientos : [],
-        ajustes: { ...base.ajustes, ...(d.ajustes || {}), objetivo: { ...base.ajustes.objetivo, ...((d.ajustes || {}).objetivo || {}) },
-          presupuestos: (d.ajustes || {}).presupuestos || {}, reglasComercio: (d.ajustes || {}).reglasComercio || {} },
+        ajustes: { ...base.ajustes, ...a, objetivo: { ...base.ajustes.objetivo, ...(a.objetivo || {}) },
+          presupuestos: a.presupuestos || {}, reglasComercio: a.reglasComercio || {}, patrimonio },
       };
     } catch { return base; }
   }
@@ -64,8 +70,14 @@
     const r = gasto / limite;
     return r >= 1 ? 'pasado' : r >= .8 ? 'aviso' : 'ok';
   }
-  const gastos = () => estado.movimientos.filter(m => m.importe < 0);
-  const ingresosMovs = () => estado.movimientos.filter(m => m.importe > 0);
+  const esGasto = m => m.importe < 0 && !M.NO_GASTO.includes(m.categoria);
+  const ingresosMovs = () => estado.movimientos.filter(m => m.importe > 0 && m.categoria === 'Ingresos');
+  const etiquetaPartida = { bbva: 'BBVA', trEfectivo: 'Trade Republic', inversiones: 'Inversiones', otros: 'Otros' };
+  function desglosePatrimonio() {
+    const p = estado.ajustes.patrimonio;
+    const partes = M.PARTIDAS.filter(([k]) => Number(p[k]) > 0).map(([k]) => `${etiquetaPartida[k]} ${eur0(p[k])}`);
+    return partes.length ? partes.join(' · ') : 'Pon tus saldos en Ajustes o importa la Posición Global del BBVA y el extracto de Trade Republic.';
+  }
   const mesesDisponibles = () => { const s = new Set(estado.movimientos.map(m => m.fecha.slice(0, 7))); s.add(mesActual()); return [...s].sort().reverse(); };
   const esStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
@@ -89,12 +101,13 @@
 
     // Meta
     if (aj.objetivo.importe > 0) {
-      const pct = Math.min(100, (aj.objetivo.ahorrado / aj.objetivo.importe) * 100);
+      const pct = Math.min(100, (r.ahorrado / aj.objetivo.importe) * 100);
       html += `<section class="tarjeta acento">
         <div class="mini">Entrada del piso</div>
-        <div class="cifra" style="margin-top:6px">${esc(eur0(aj.objetivo.ahorrado))} <small>de ${esc(eur0(aj.objetivo.importe))}</small></div>
+        <div class="cifra" style="margin-top:6px">${esc(eur0(r.ahorrado))} <small>de ${esc(eur0(aj.objetivo.importe))}</small></div>
         ${barra(pct, 'meta')}
         <div class="fila"><span class="sub">${pct.toFixed(0)} % conseguido</span><span class="sub">Faltan ${esc(eur0(r.faltan))}</span></div>
+        <p class="sub" style="margin-top:8px;font-size:.82rem">${esc(desglosePatrimonio())}</p>
         ${r.mesesHastaFecha != null ? `<hr style="border-color:rgba(255,255,255,.15)"><div class="fila"><span class="sub">Fecha límite ${esc(nombreMesCorto(aj.objetivo.fechaLimite.slice(0, 7)))} · ${r.mesesHastaFecha} meses</span><span class="cifra-m">${r.necesarioMes != null ? esc(eur0(r.necesarioMes)) + '<span class="sub">/mes</span>' : ''}</span></div>` : ''}
       </section>`;
     } else {
@@ -107,7 +120,8 @@
         let cuerpo, sello = '';
         if (r.ahorroRealMes > 0) {
           const vs = r.mesesHastaFecha != null && r.mesesConRitmoActual != null ? r.mesesConRitmoActual - r.mesesHastaFecha : null;
-          if (vs != null) sello = vs <= 0 ? `<span class="sello verde">Vas bien · ${-vs} meses antes</span>` : `<span class="sello rojo">Vas tarde · ${vs} meses después</span>`;
+          const mesesTxt = n => `${n} ${n === 1 ? 'mes' : 'meses'}`;
+          if (vs != null) sello = vs === 0 ? '<span class="sello verde">Justo a tiempo</span>' : vs < 0 ? `<span class="sello verde">Vas bien · ${mesesTxt(-vs)} antes</span>` : `<span class="sello rojo">Vas tarde · ${mesesTxt(vs)} después</span>`;
           cuerpo = `<div class="cifra verde">${esc(eur0(r.ahorroRealMes))}<small>/mes</small></div>
             <p class="sub" style="margin-top:8px">Ingresas ${esc(eur0(aj.ingresosMensuales))} y gastas de media ${esc(eur0(r.gastoMedioMes))}. ${r.faltan > 0 && r.fechaEstimada ? `A este ritmo llegas a la entrada en <b>${esc(nombreMesCorto(r.fechaEstimada))}</b>.` : ''}</p>`;
         } else {
@@ -132,6 +146,7 @@
         ${totalLimite ? `${barra(res.gastos / totalLimite * 100, est)}<div class="fila"><span class="sub">Límite total ${esc(eur0(totalLimite))}</span><span class="sub ${est === 'pasado' ? 'rojo' : ''}">${res.gastos <= totalLimite ? 'Te quedan ' + esc(eur0(totalLimite - res.gastos)) : 'Te has pasado ' + esc(eur0(res.gastos - totalLimite))}</span></div>`
           : `<p class="sub" style="margin-top:8px">Unos ${esc(eur0(res.gastos / dia))} al día. Si sigues así, acabarás el mes en <b>${esc(eur0(previsto))}</b>. <a href="#" data-ir="presupuestos" style="color:var(--acento)">Ponte límites</a>.</p>`}
         ${res.ingresos ? `<p class="sub" style="margin-top:8px">Ingresos registrados este mes: <span class="verde">${esc(eur(res.ingresos))}</span></p>` : ''}
+        ${res.invertido ? `<p class="sub" style="margin-top:8px">Invertido este mes: <span class="verde">${esc(eur(res.invertido))}</span> (no cuenta como gasto)</p>` : ''}
       </section>`;
 
       // Desglose
@@ -155,8 +170,8 @@
     if (ui.mes !== 'todos' && !meses.includes(ui.mes)) ui.mes = 'todos';
     const q = ui.busqueda.trim().toLowerCase();
     const lista = estado.movimientos.filter(m => (ui.mes === 'todos' || m.fecha.startsWith(ui.mes)) && (ui.cat === 'todas' || m.categoria === ui.cat) && (!q || m.concepto.toLowerCase().includes(q)));
-    const totalG = lista.filter(m => m.importe < 0).reduce((a, m) => a - m.importe, 0);
-    const totalI = lista.filter(m => m.importe > 0).reduce((a, m) => a + m.importe, 0);
+    const totalG = lista.filter(esGasto).reduce((a, m) => a - m.importe, 0);
+    const totalI = lista.filter(m => m.importe > 0 && m.categoria === 'Ingresos').reduce((a, m) => a + m.importe, 0);
     const catsPresentes = M.CATEGORIAS.filter(c => estado.movimientos.some(m => m.categoria === c));
     let html = `<div class="filtros">
       <select id="f-mes">${['todos', ...meses].map(m => `<option value="${m}" ${ui.mes === m ? 'selected' : ''}>${m === 'todos' ? 'Todos los meses' : esc(nombreMes(m))}</option>`).join('')}</select>
@@ -173,9 +188,9 @@
       const porDia = {};
       for (const m of lista) (porDia[m.fecha] = porDia[m.fecha] || []).push(m);
       for (const f of Object.keys(porDia).sort().reverse()) {
-        const dia = porDia[f], tot = dia.reduce((a, m) => a + (m.importe < 0 ? -m.importe : 0), 0);
+        const dia = porDia[f], tot = dia.reduce((a, m) => a + (esGasto(m) ? -m.importe : 0), 0);
         html += `<div class="dia"><div class="dia-cab"><span>${esc(fechaLarga(f))}</span><span>${esc(eur(tot))}</span></div><div class="lista">
-          ${dia.map(m => `<button class="mov" data-id="${m.id}"><span class="concepto">${esc(m.concepto)}</span><span class="cat ${m.origen === 'manual' ? 'manual' : ''}">${esc(m.categoria)}</span><span class="importe ${m.importe > 0 ? 'ingreso' : ''}">${m.importe > 0 ? '+' : ''}${esc(eur(m.importe))}</span></button>`).join('')}
+          ${dia.map(m => `<button class="mov" data-id="${m.id}"><span class="concepto">${esc(m.concepto)}</span><span class="cat ${esc(m.origen || '')}">${esc(m.categoria)}</span><span class="importe ${m.categoria === 'Ingresos' ? 'ingreso' : (M.NO_GASTO.includes(m.categoria) ? 'neutro' : '')}">${m.importe > 0 ? '+' : ''}${esc(eur(m.importe))}</span></button>`).join('')}
         </div></div>`;
       }
     }
@@ -230,7 +245,7 @@
   function renderPresupuestos() {
     const mes = mesActual(), res = M.resumenMensual(estado.movimientos, mes), lim = estado.ajustes.presupuestos;
     const g = M.gastoMedioMensual(estado.movimientos, hoy());
-    const cats = M.CATEGORIAS.filter(c => c !== 'Ingresos').sort((a, b) => (res.porCategoria[b] || 0) - (res.porCategoria[a] || 0) || (g.porCategoria[b] || 0) - (g.porCategoria[a] || 0));
+    const cats = M.CATEGORIAS.filter(c => !M.NO_GASTO.includes(c)).sort((a, b) => (res.porCategoria[b] || 0) - (res.porCategoria[a] || 0) || (g.porCategoria[b] || 0) - (g.porCategoria[a] || 0));
     const total = Object.values(lim).reduce((a, b) => a + (Number(b) || 0), 0);
     const sinLimite = cats.filter(c => !lim[c] && (g.porCategoria[c] || 0) > 0);
     const est = estadoPresu(res.gastos, total);
@@ -310,14 +325,20 @@
       <hr>
       <h2>El piso</h2>
       <div class="campo" style="margin-top:12px"><label for="a-obj">Entrada que necesitas</label><div class="con-unidad"><input id="a-obj" type="text" inputmode="decimal" value="${aj.objetivo.importe || ''}" placeholder="30.000"></div><span class="ayuda">Normalmente el 20 % del precio más un 10 % de gastos e impuestos.</span></div>
-      <div class="campo"><label for="a-aho">Lo que ya tienes ahorrado</label><div class="con-unidad"><input id="a-aho" type="text" inputmode="decimal" value="${aj.objetivo.ahorrado || ''}" placeholder="0"></div></div>
       <div class="campo"><label for="a-fec">Para cuándo</label><input id="a-fec" type="date" value="${esc(aj.objetivo.fechaLimite)}" min="${hoy()}"></div>
+    </section>
+    <section class="tarjeta"><div class="fila"><h2>Lo que ya tienes</h2><span class="cifra-m verde">${esc(eur0(M.ahorradoTotal(aj.patrimonio)))}</span></div>
+      <p class="sub" style="margin:6px 0 4px">Es lo que cuenta para la entrada. Se actualiza solo al importar la Posición Global del BBVA y el extracto de Trade Republic, pero puedes corregirlo a mano.</p>
+      ${M.PARTIDAS.map(([k, nombre]) => `<div class="campo"><label for="a-p-${k}">${esc(nombre)}</label><div class="con-unidad"><input id="a-p-${k}" data-partida="${k}" type="text" inputmode="decimal" value="${aj.patrimonio[k] || ''}" placeholder="0"></div></div>`).join('')}
     </section>
     <section class="tarjeta"><h2>Datos</h2>
       <p class="sub" style="margin:6px 0 12px">${n ? `${n} movimientos, del ${esc(fechaLocal(fechas[0]).toLocaleDateString('es-ES'))} al ${esc(fechaLocal(fechas[n - 1]).toLocaleDateString('es-ES'))}.` : 'Todavía no hay movimientos.'}</p>
       <input id="a-xlsx" type="file" accept=".xlsx,.xls,.csv" hidden>
       <button class="btn primario" id="a-importar">Importar Excel del BBVA</button>
-      <p class="ayuda sub" style="margin-top:8px">En la app del BBVA: Cuentas o Tarjetas → Movimientos → Exportar → Excel. Luego guárdalo en Archivos y elígelo aquí. Puedes repetirlo cada semana: no se duplica nada.</p>
+      <p class="ayuda sub" style="margin-top:8px">En la app del BBVA: Cuentas o Tarjetas → Movimientos → Exportar → Excel. Vale también el Excel de <b>Posición Global</b>: actualiza tu efectivo BBVA. Guárdalos en Archivos y elígelos aquí. Puedes repetirlo cada semana: no se duplica nada.</p>
+      <input id="a-pdf" type="file" accept=".pdf,application/pdf" hidden>
+      <button class="btn primario" id="a-importar-tr" style="margin-top:12px">Importar extracto de Trade Republic</button>
+      <p class="ayuda sub" style="margin-top:8px">En Trade Republic: icono de perfil → Actividad → Documentos → <b>Extracto de cuenta</b> (PDF). Los pagos con su tarjeta entran como gastos; las compras de ETFs, como inversión; las transferencias desde tu BBVA, como traspaso.</p>
       <hr>
       <input id="a-json" type="file" accept=".json,application/json" hidden>
       <div class="btn-fila"><button class="btn" id="a-exportar">Guardar copia</button><button class="btn" id="a-restaurar">Restaurar copia</button></div>
@@ -327,8 +348,13 @@
     <p class="sub" style="text-align:center">Tus datos solo están en este dispositivo. Nada se envía a ningún servidor.</p>`;
     const v = $('#vista'); v.innerHTML = html;
     const num = id => { const x = M.parseImporte($(id).value); return x == null || x < 0 ? 0 : x; };
-    const guardarNums = () => { aj.ingresosMensuales = num('#a-ing'); aj.objetivo.importe = num('#a-obj'); aj.objetivo.ahorrado = num('#a-aho'); aj.objetivo.fechaLimite = $('#a-fec').value || ''; guardar(); };
-    ['#a-ing', '#a-obj', '#a-aho', '#a-fec'].forEach(id => $(id).addEventListener('change', () => { guardarNums(); toast('Guardado'); }));
+    const guardarNums = () => { aj.ingresosMensuales = num('#a-ing'); aj.objetivo.importe = num('#a-obj'); aj.objetivo.fechaLimite = $('#a-fec').value || ''; guardar(); };
+    ['#a-ing', '#a-obj', '#a-fec'].forEach(id => $(id).addEventListener('change', () => { guardarNums(); toast('Guardado'); }));
+    v.querySelectorAll('input[data-partida]').forEach(i => i.addEventListener('change', e => {
+      const x = M.parseImporte(e.target.value); aj.patrimonio[e.target.dataset.partida] = x == null || x < 0 ? 0 : x; guardar(); render(); toast('Guardado');
+    }));
+    $('#a-importar-tr').addEventListener('click', () => $('#a-pdf').click());
+    $('#a-pdf').addEventListener('change', async e => { const f = e.target.files[0]; e.target.value = ''; if (f) await importarPdfTR(f); });
     const u = $('#a-usar-ing'); if (u) u.addEventListener('click', e => { e.preventDefault(); $('#a-ing').value = Math.round(ingDetectados); guardarNums(); render(); toast('Ingresos guardados'); });
     $('#a-importar').addEventListener('click', () => $('#a-xlsx').click());
     $('#a-xlsx').addEventListener('change', async e => { const f = e.target.files[0]; e.target.value = ''; if (f) await importarExcel(f); });
@@ -348,11 +374,62 @@
         const rows = XLSX.utils.sheet_to_json(wb.Sheets[nombre], { header: 1, raw: true, defval: null });
         try { const r = M.parseBbva(rows); if (!mejor || r.movimientos.length > mejor.movimientos.length) mejor = r; } catch { /* hoja sin cabecera */ }
       }
-      if (!mejor) return toast('Este archivo no parece un export de movimientos del BBVA.');
+      if (!mejor) {
+        for (const nombre of wb.SheetNames) {
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets[nombre], { header: 1, raw: true, defval: null });
+          try {
+            const p = M.parsePosicionGlobal(rows);
+            estado.ajustes.patrimonio.bbva = p.total; guardar(); render();
+            return toast(`Efectivo BBVA actualizado: ${eur(p.total)} (${p.cuentas.length} cuenta${p.cuentas.length > 1 ? 's' : ''})`);
+          } catch { /* no es una Posición Global */ }
+        }
+        return toast('Este archivo no parece un export del BBVA.');
+      }
       const r = M.fusionar(estado.movimientos, mejor.movimientos, estado.ajustes.reglasComercio);
       estado.movimientos = r.lista; guardar(); render();
       toast(`${r.anadidos} añadidos · ${r.duplicados} ya estaban${mejor.saltadas ? ` · ${mejor.saltadas} filas saltadas` : ''}`);
     } catch (err) { console.error(err); toast('No he podido leer ese archivo.'); }
+  }
+
+  // ---------- Trade Republic (PDF) ----------
+  let pdfjsPromesa = null;
+  function cargarPdfJs() {
+    if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+    if (!pdfjsPromesa) pdfjsPromesa = new Promise((ok, ko) => {
+      const s = document.createElement('script'); s.src = PDFJS_URL;
+      s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER; ok(window.pdfjsLib); };
+      s.onerror = () => { pdfjsPromesa = null; ko(new Error('pdfjs')); };
+      document.head.appendChild(s);
+    });
+    return pdfjsPromesa;
+  }
+  async function textoDePdf(file) {
+    const pdfjs = await cargarPdfJs();
+    const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    let texto = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const c = await (await pdf.getPage(i)).getTextContent();
+      texto += c.items.map(it => it.str + (it.hasEOL ? '\n' : ' ')).join('') + '\n';
+    }
+    return texto;
+  }
+  async function importarPdfTR(file) {
+    toast('Leyendo el extracto…');
+    try {
+      const p = M.parseTradeRepublic(await textoDePdf(file));
+      const r = M.fusionar(estado.movimientos, p.movimientos, estado.ajustes.reglasComercio);
+      estado.movimientos = r.lista;
+      const pat = estado.ajustes.patrimonio;
+      if (p.balanceFinal != null) pat.trEfectivo = p.balanceFinal;
+      const invertidoNuevo = r.nuevos.filter(m => m.categoria === 'Inversión').reduce((a, m) => a - m.importe, 0);
+      pat.inversiones = Math.max(0, Math.round(((Number(pat.inversiones) || 0) + invertidoNuevo) * 100) / 100);
+      guardar(); render();
+      toast(`${r.anadidos} añadidos · ${r.duplicados} ya estaban · efectivo TR ${eur(pat.trEfectivo)}`);
+    } catch (err) {
+      console.error(err);
+      toast(err.message === 'no-extracto' ? 'Este PDF no parece un extracto de cuenta de Trade Republic.'
+        : err.message === 'pdfjs' ? 'No he podido cargar el lector de PDF. ¿Tienes conexión?' : 'No he podido leer ese PDF.');
+    }
   }
 
   function exportarCopia() {
